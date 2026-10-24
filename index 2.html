@@ -1,0 +1,81 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Parallel Reader V3.1 完整句阅读版</title>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#253341;background:#f6f6f2}*{box-sizing:border-box}body{margin:0}header{position:sticky;top:0;background:#fff;border-bottom:1px solid #ddd;padding:12px 14px;z-index:5;display:flex;align-items:center;justify-content:space-between}main{max-width:900px;margin:auto;padding:16px}h1{font-size:19px;margin:0}button,input,select{font:inherit}button{border:1px solid #c6d1db;background:#fff;border-radius:10px;padding:10px 13px;color:#245e95;cursor:pointer}button.primary{background:#245e95;color:white}button:disabled{opacity:.45}section{background:white;border:1px solid #e1e4e7;border-radius:14px;padding:15px;margin-bottom:15px}.controls{display:flex;gap:9px;flex-wrap:wrap;align-items:center}.hint{font-size:13px;color:#667585;line-height:1.6}.status{font-size:13px;white-space:pre-wrap;color:#245e95}.pair{padding:18px 4px;border-bottom:1px solid #e4e8e9;line-height:1.85}.en{color:#5e6c78;font-size:15px}.zh{font-size:18px;margin-top:10px;white-space:pre-wrap}.page{font-size:12px;color:#7b8792}.first{background:#ffeb9c;border-radius:3px}.term{background:#cce9fa;border-radius:3px}.ask{font-size:12px;padding:5px 8px;margin-top:8px}.drawer{position:fixed;bottom:0;left:0;right:0;background:white;box-shadow:0 -4px 25px #0002;border-radius:18px 18px 0 0;padding:18px;z-index:10;max-height:60vh;overflow:auto;display:none}.drawer.open{display:block}textarea{width:100%;min-height:80px;border:1px solid #ccd4dc;border-radius:10px;padding:10px;font:inherit}label{font-size:14px}select{border:1px solid #ccd4dc;border-radius:8px;padding:8px}#reading:empty:after{content:"导入 PDF 并点击「提取并翻译」，双语内容就会显示在这里。";color:#8996a0} .note{background:#fff6da;padding:8px;border-radius:8px} @media(min-width:700px){.pair{display:grid;grid-template-columns:1fr 1fr;gap:20px}.zh{margin-top:0}} 
+</style></head><body><header><h1>📖 Parallel Reader <small>V3.1 完整句阅读版</small></h1><button id="settings">设置</button></header><main>
+<section><strong>① 上传英文 PDF</strong><p><input id="file" type="file" accept="application/pdf,.pdf"></p><div class="controls"><label>测试页数 <select id="pages"><option value="1">前 1 页</option><option value="2" selected>前 2 页</option><option value="3">前 3 页</option></select></label><button class="primary" id="run">提取并自动翻译</button><button id="stop">停止</button></div><p class="hint">优先保持完整句子，允许句子跨页；只读取所选页数，最后一句可能因后续页未导入而不完整。首次建议测试 2 页。翻译服务使用 MyMemory 公共接口，可能有额度、网络或跨域限制；部分文献内容会发送到第三方服务，请勿用于机密文献。</p><div id="status" class="status" aria-live="polite"></div></section>
+<section><div class="controls"><strong>② 连续双语阅读</strong><label><input type="checkbox" id="markfirst" checked> 句首荧光</label><label><input type="checkbox" id="markterms" checked> 术语蓝色</label><button id="clear">清空本页</button></div><div id="reading"></div></section>
+</main><div class="drawer" id="drawer"><div class="controls" style="justify-content:space-between"><strong>阅读疑问 / 批注</strong><button id="close">关闭 ×</button></div><p id="excerpt" class="hint"></p><textarea id="question" placeholder="这段话我不理解的是……"></textarea><div class="controls"><button id="save">保存批注</button><button id="copy">复制问题，去 ChatGPT 提问</button></div><p class="hint">此免费试验版不提供网页内 AI 回答；关闭批注会保持原阅读位置。</p><div id="notes" class="hint"></div></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script><script>
+const $=id=>document.getElementById(id),status=t=>$('status').textContent=t;
+let stopped=false, blocks=[], current=-1, notes={}, cache={};
+try{notes=JSON.parse(localStorage.getItem('pr_notes')||'{}');cache=JSON.parse(localStorage.getItem('pr_cache')||'{}')}catch(e){}
+const terms=['平等','机会','自由','责任','正义','德性','休闲','主体性','福利','权利','分配'];
+function escapeHTML(s){return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function mark(s){let text=escapeHTML(s);if($('markterms').checked){for(let t of terms)text=text.replaceAll(t,'<span class="term">'+t+'</span>')}if($('markfirst').checked)text=text.replace(/(^|[。！？]\s*)([^\s<，。！？：；]{1,4})/g,(_,a,b)=>a+'<span class="first">'+b+'</span>');return text}
+function render(){const area=$('reading');area.innerHTML='';blocks.forEach((b,i)=>{const el=document.createElement('div');el.className='pair';el.innerHTML='<div><div class="page">Page '+b.page+' · 原文</div><div class="en">'+escapeHTML(b.en)+'</div></div><div><div class="page">中文译文</div><div class="zh">'+mark(b.zh||'（翻译中…）')+'</div><button class="ask" data-i="'+i+'">✎ 提问 / 批注</button></div>';area.appendChild(el)});area.querySelectorAll('.ask').forEach(b=>b.onclick=()=>openNote(+b.dataset.i))}
+function extractLines(items){let lines=[],line=null;for(const item of items){if(!item.str||!item.str.trim())continue;const y=Math.round(item.transform[5]/4)*4;if(!line||Math.abs(line.y-y)>5){line={y,text:item.str};lines.push(line)}else{line.text+=(item.hasEOL?' ':' ')+item.str}}return lines.map(x=>x.text.replace(/\s+/g,' ').trim()).filter(Boolean)}
+// Rebuild prose across PDF visual lines and page boundaries before sentence segmentation.
+function normalizeProse(lines){return lines.join(' ').replace(/([A-Za-z])-\s+([a-z])/g,'$1$2').replace(/\s+/g,' ').trim()}
+function sentenceChunks(text,limit=380){
+ const sentences=text.match(/[^.!?]+(?:[.!?]+(?=\s|$)|$)/g)||[text];
+ const result=[];let pending='';
+ for(const raw of sentences){const sentence=raw.trim();if(!sentence)continue;
+  if(sentence.length>limit){if(pending){result.push(pending);pending=''}
+   // A sentence too long for the public API must not be silently split.
+   result.push({oversize:sentence});continue}
+  if(pending && (pending+' '+sentence).length>limit){result.push(pending);pending=sentence}
+  else pending+=(pending?' ':'')+sentence;
+ }
+ if(pending)result.push(pending);return result;
+}
+async function translate(text){const key='v3:'+text;if(cache[key])return cache[key];const url='https://api.mymemory.translated.net/get?q='+encodeURIComponent(text)+'&langpair=en|zh-CN';const res=await fetch(url);if(!res.ok)throw Error('翻译接口 HTTP '+res.status);const data=await res.json();if(!data.responseData||!data.responseData.translatedText||Number(data.responseStatus)>=400)throw Error(data.responseDetails||'翻译接口返回错误');const translated=data.responseData.translatedText;cache[key]=translated;try{localStorage.setItem('pr_cache',JSON.stringify(cache))}catch(e){}return translated}
+$('run').onclick=async()=>{
+ const file=$('file').files[0];if(!file)return status('请先选择一个 PDF 文件。');
+ if(!window.pdfjsLib)return status('PDF.js 加载失败，请检查网络。');
+ stopped=false;blocks=[];render();$('run').disabled=true;
+ try{
+  pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  status('正在提取 PDF 文本并重组完整句子…');
+  const pdf=await pdfjsLib.getDocument({data:new Uint8Array(await file.arrayBuffer())}).promise;
+  const count=Math.min(pdf.numPages,Number($('pages').value));const all=[];
+  for(let p=1;p<=count;p++){
+   const page=await pdf.getPage(p);const content=await page.getTextContent();
+   const lines=extractLines(content.items);
+   if(lines.length)all.push({page:p,text:normalizeProse(lines)});
+  }
+  if(!all.length)throw Error('没有提取到文字，可能是扫描版 PDF。');
+  // Keep page boundaries as metadata, but let unfinished sentences cross pages.
+  const pieces=[];let buffer='';let startPage=all[0].page;
+  for(const entry of all){
+   if(!buffer)startPage=entry.page;
+   buffer+=(buffer?' ':'')+entry.text;
+   const sentences=buffer.match(/[^.!?]+[.!?]+(?=\s|$)/g)||[];
+   const consumed=sentences.join('');
+   if(sentences.length){
+    const chunks=sentenceChunks(consumed);
+    for(const item of chunks)pieces.push({page:startPage,part:item});
+    buffer=buffer.slice(consumed.length).trim();startPage=entry.page;
+   }
+  }
+  if(buffer.trim())for(const item of sentenceChunks(buffer))pieces.push({page:startPage,part:item});
+  for(let i=0;i<pieces.length&&!stopped;i++){
+   const piece=pieces[i];const oversized=typeof piece.part==='object';
+   const en=oversized?piece.part.oversize:piece.part;
+   const block={page:piece.page,en,zh:''};blocks.push(block);
+   status('正在翻译完整句子组 '+(i+1)+' / '+pieces.length+'…');
+   if(oversized){block.zh='⚠ 该句超过免费翻译接口的安全长度限制，已保留完整英文，请手动处理。';}
+   else{
+    try{block.zh=await translate(en)}catch(e){block.zh='⚠ 翻译失败：'+e.message;render();throw e}
+   }
+   render();await new Promise(r=>setTimeout(r,250));
+  }
+  status(stopped?'已停止，已完成部分仍可阅读。':'处理完成：'+blocks.length+' 个完整句子组。注意：PDF 双栏、脚注及复杂排版仍可能导致提取顺序不正确。');
+ }catch(e){status('未能完成：'+e.message)}finally{$('run').disabled=false}
+};
+$('stop').onclick=()=>{stopped=true;status('正在停止…')};$('clear').onclick=()=>{blocks=[];render();status('已清空阅读区域，翻译缓存仍保留。')};$('markfirst').onchange=render;$('markterms').onchange=render;
+function openNote(i){current=i;$('excerpt').textContent=blocks[i].en.slice(0,260);$('question').value=notes[blocks[i].en]||'';$('drawer').classList.add('open');$('notes').textContent=''}
+$('close').onclick=()=>$('drawer').classList.remove('open');
+$('save').onclick=()=>{if(current<0)return;notes[blocks[current].en]=$('question').value;try{localStorage.setItem('pr_notes',JSON.stringify(notes));$('notes').textContent='已保存到本机浏览器。'}catch(e){$('notes').textContent='本地存储不可用。'}};
+$('copy').onclick=async()=>{if(current<0)return;const t='请用简洁中文解释下面的学术文献片段，并回答我的问题：\n原文：'+blocks[current].en+'\n问题：'+$('question').value;try{await navigator.clipboard.writeText(t);$('notes').textContent='已复制。打开 ChatGPT 粘贴提问即可。'}catch(e){$('notes').textContent='复制失败，请手动选中文本。'}};
+$('settings').onclick=()=>window.scrollTo({top:0,behavior:'smooth'});
+</script></body></html>
